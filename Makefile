@@ -4,13 +4,9 @@ NS_INNER_DEV=inner_veth
 MAP_PATH=/sys/fs/bpf/hopper/map
 PROG_PATH=/sys/fs/bpf/hopper/prog
 
-all: hopper.bpf.o user
-
-%.o:%.c
-	clang -O2 -Wall -g -target bpf -c $^ -o build/$@
-
-user: user.c
-	clang -O2 -Wall -g -lbpf $^ -o build/$@
+all:
+	clang -O2 -Wall -g -target bpf -c src/hopper.bpf.c -o build/hopper.bpf.o
+	clang -O2 -Wall -g -lbpf src/user.c -o build/user
 
 xl: xun all
 	sudo mkdir -p $(MAP_PATH) $(PROG_PATH)
