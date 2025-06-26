@@ -14,15 +14,13 @@
 
 #include "common.h"
 
-#define VERBOSE
-
 #ifdef VERBOSE
-#define print(tag, fmt, ...)                                                                       \
+#define trace(tag, fmt, ...)                                                                       \
     bpf_printk("%s: Index %u, Name %s, IP: src %pI4, dest %pI4, Port: src %u, dest %u\t" fmt, tag, \
                ctx->ingress_ifindex, ifname, &ip->saddr, &ip->daddr, bpf_ntohs(tcp->source),       \
                bpf_ntohs(tcp->dest), ##__VA_ARGS__)
 #else
-#define print(tag, fmt, ...) ;
+#define trace(tag, fmt, ...) ;
 #endif
 
 struct {
@@ -45,15 +43,12 @@ static __always_inline int verify_n_parse(struct hopper_opt* opt, void* data, vo
 {
     *eth = data;
     *ip = (void*)(*eth + 1);
-    *tcp = (void*)(*ip + 1);
 
-    if (!opt || opt->max_p <= opt->min_p || (void*)(*tcp + 1) > data_end ||
-        bpf_ntohs((*eth)->h_proto) != ETH_P_IP || (*ip)->protocol != IPPROTO_TCP ||
-        (void*)(*tcp) + 60 > data_end) {
-        return -1;
-    }
+    if ((void*)((*ip) + 1) > data_end || (*ip)->ihl < 5 || (*ip)->ihl > 15) return -1;
+    *tcp = (void*)(*ip) + (*ip)->ihl * 4;
 
-    return 0;
+    return (!opt || opt->max_p <= opt->min_p || (void*)(*tcp + 1) > data_end ||
+            bpf_ntohs((*eth)->h_proto) != ETH_P_IP || (*ip)->protocol != IPPROTO_TCP);
 }
 
 SEC("tc")
@@ -75,12 +70,12 @@ int tc_port_hopper_egress(struct __sk_buff* ctx)
         !(tcp->dest == bpf_htons(opt->in_p) || tcp->source == bpf_htons(opt->in_p)))
         goto out;
 
-    __be16* o_p = tcp->dest == bpf_htons(opt->in_p) ? &tcp->dest : &tcp->source;
-    __be16 n_p = bpf_htons((bpf_get_prandom_u32() % (opt->max_p - opt->min_p)) + opt->min_p);
+    __be16* port_ref = tcp->dest == bpf_htons(opt->in_p) ? &tcp->dest : &tcp->source;
+    __be16 new_port = bpf_htons((bpf_get_prandom_u32() % (opt->max_p - opt->min_p)) + opt->min_p);
+    trace("EG", "(%u ==> %u)", bpf_ntohs(*port_ref), bpf_ntohs(new_port));
+    *port_ref = new_port;
 
-    print("EG", "(%u ==> %u)", bpf_ntohs(*o_p), bpf_ntohs(n_p));
-    *o_p = n_p;
-    bpf_csum_diff(0, 0, (void*)tcp, tcp->doff * 4, 0);
+    // Attention: if egress checksum offload is not enabled, redo the checksum, just like ingress
 
 out:
     return TC_ACT_OK;
@@ -92,8 +87,8 @@ static __always_inline int in_range(struct hopper_opt* opt, __be16 port)
     return port < opt->max_p && port >= opt->min_p;
 }
 
-SEC("xdp")
-int xdp_port_hopper_ingress(struct xdp_md* ctx)
+SEC("tc")
+int tc_port_hopper_ingress(struct __sk_buff* ctx)
 {
     int key = 0;
     struct ethhdr* eth;
@@ -111,14 +106,16 @@ int xdp_port_hopper_ingress(struct xdp_md* ctx)
         !(in_range(opt, tcp->dest) || in_range(opt, tcp->source)))
         goto out;
 
-    __be16* o_p = in_range(opt, tcp->dest) ? &tcp->dest : &tcp->source;
+    __be16* ref_port = in_range(opt, tcp->dest) ? &tcp->dest : &tcp->source;
+    __be16 save = *ref_port;
+    trace("IN", "(%u ==> %u)", bpf_ntohs(*ref_port), opt->in_p);
 
-    print("IN", "(%u ==> %u)", bpf_ntohs(*o_p), opt->in_p);
-    *o_p = bpf_htons(opt->in_p);
-    bpf_csum_diff(0, 0, (void*)tcp, tcp->doff * 4, 0);
+    *ref_port = bpf_htons(opt->in_p);
+    int off = ETH_HLEN + (ip->ihl * 4) + offsetof(struct tcphdr, check);
+    bpf_l4_csum_replace(ctx, off, save, *ref_port, sizeof(save) | BPF_F_PSEUDO_HDR);
 
 out:
-    return XDP_PASS;
+    return TC_ACT_OK;
 }
 
 char _license[] SEC("license") = "GPL";

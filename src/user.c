@@ -1,18 +1,9 @@
 #include <arpa/inet.h>
-#include <assert.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
-#include <getopt.h>
-#include <linux/if_ether.h>
-#include <linux/if_link.h>
-#include <locale.h>
 #include <net/if.h>
-#include <stdbool.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "common.h"

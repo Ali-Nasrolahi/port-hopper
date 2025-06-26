@@ -1,0 +1,7 @@
+services:
+  server_build:
+    image: nginx
+    volumes:
+      - ./build:/usr/share/nginx/html/build:z
+    ports:
+      - 8080:80
