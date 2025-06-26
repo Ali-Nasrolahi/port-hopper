@@ -14,10 +14,12 @@
 
 #include "common.h"
 
+#define VERBOSE
+
 #ifdef VERBOSE
 #define trace(tag, fmt, ...)                                                                       \
     bpf_printk("%s: Index %u, Name %s, IP: src %pI4, dest %pI4, Port: src %u, dest %u\t" fmt, tag, \
-               ctx->ingress_ifindex, ifname, &ip->saddr, &ip->daddr, bpf_ntohs(tcp->source),       \
+               ctx->ifindex, opt->ifname, &ip->saddr, &ip->daddr, bpf_ntohs(tcp->source),          \
                bpf_ntohs(tcp->dest), ##__VA_ARGS__)
 #else
 #define trace(tag, fmt, ...) ;
@@ -27,15 +29,8 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, int);
     __type(value, struct hopper_opt);
-    __uint(max_entries, 1);
+    __uint(max_entries, 100);
 } config SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, int);
-    __type(value, char[IF_NAMESIZE]);
-    __uint(max_entries, 10);
-} if2name SEC(".maps");
 
 static __always_inline int verify_n_parse(struct hopper_opt* opt, void* data, void* data_end,
                                           struct ethhdr** eth, struct iphdr** ip,
@@ -54,7 +49,6 @@ static __always_inline int verify_n_parse(struct hopper_opt* opt, void* data, vo
 SEC("tc")
 int tc_port_hopper_egress(struct __sk_buff* ctx)
 {
-    int key = 0;
     struct ethhdr* eth;
     struct iphdr* ip;
     struct tcphdr* tcp;
@@ -62,9 +56,8 @@ int tc_port_hopper_egress(struct __sk_buff* ctx)
     void* data = (void*)(long)ctx->data;
     void* data_end = (void*)(long)ctx->data_end;
 
+    int key = ctx->ifindex;
     opt = bpf_map_lookup_elem(&config, &key);
-    key = ctx->ingress_ifindex;
-    const char* ifname = bpf_map_lookup_elem(&if2name, &key) ?: "[na]";
 
     if (verify_n_parse(opt, data, data_end, &eth, &ip, &tcp) ||
         !(tcp->dest == bpf_htons(opt->in_p) || tcp->source == bpf_htons(opt->in_p)))
@@ -90,7 +83,6 @@ static __always_inline int in_range(struct hopper_opt* opt, __be16 port)
 SEC("tc")
 int tc_port_hopper_ingress(struct __sk_buff* ctx)
 {
-    int key = 0;
     struct ethhdr* eth;
     struct iphdr* ip;
     struct tcphdr* tcp;
@@ -98,9 +90,8 @@ int tc_port_hopper_ingress(struct __sk_buff* ctx)
     void* data = (void*)(long)ctx->data;
     void* data_end = (void*)(long)ctx->data_end;
 
+    int key = ctx->ifindex;
     opt = bpf_map_lookup_elem(&config, &key);
-    key = ctx->ingress_ifindex;
-    const char* ifname = bpf_map_lookup_elem(&if2name, &key) ?: "[na]";
 
     if (verify_n_parse(opt, data, data_end, &eth, &ip, &tcp) ||
         !(in_range(opt, tcp->dest) || in_range(opt, tcp->source)))

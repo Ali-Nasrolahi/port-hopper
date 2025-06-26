@@ -13,7 +13,6 @@ xl: xun all
 	sudo bpftool prog loadall build/hopper.bpf.o $(PROG_PATH) pinmaps $(MAP_PATH)
 	@sudo bpftool net attach tcx_ingress pinned $(PROG_PATH)/tc_port_hopper_ingress dev $(NS_OUTER_DEV)
 	@sudo bpftool net attach tcx_egress  pinned $(PROG_PATH)/tc_port_hopper_egress   dev $(NS_OUTER_DEV)
-	@sudo ip netns exec $(NS) bash -c "mount --bind /var/run/netns/bpf/ /sys/fs/bpf/; make xin;"
 	@sudo ./build/user
 	@echo -e '\nLoad Success\n'
 

@@ -1,0 +1,233 @@
+#!/bin/bash
+
+# Default configuration
+NS="port-hopper-namespace"
+NS_OUTER_DEV="outer_veth"
+NS_INNER_DEV="inner_veth"
+MAP_PATH="/sys/fs/bpf/hopper/map"
+PROG_PATH="/sys/fs/bpf/hopper/prog"
+BRIDGE="br0"
+VM_IMAGE="iso/alpine.img"
+BUILD_DIR="build"
+SRC_DIR="src"
+IP_OUTER="192.168.1.1/24"
+IP_INNER="192.168.1.2/24"
+MAP_NAME="config"
+
+usage() {
+    echo "Usage: $0 [command] [options]"
+    echo "Commands and options:"
+    echo "  compile [-s src_dir] [-b build_dir]                    Compile BPF and userspace programs"
+    echo "  load [-d outer_dev] [-m map_path] [-p prog_path]       Load/attach BPF to outer interface"
+    echo "  load-inner [-d inner_dev] [-m map_path] [-p prog_path] Load/attach BPF to inner interface"
+    echo "  unload [-d dev] [-m map_path] [-p prog_path]           Unload BPF programs"
+    echo "  setup-vm [-b bridge] [-i image]                        Set up Linux bridge and QEMU VMs"
+    echo "  setup-ns [-n ns] [-o outer_dev] [-i inner_dev] [-a outer_ip] [-b inner_ip] Create namespace"
+    echo "  remove-ns [-n ns]                                      Remove network namespace"
+    echo "  enter-ns [-n ns]                                       Enter network namespace"
+    echo "  config [-n ifname] [-p in_port] [-f min_port] [-t max_port] Configure BPF map"
+    echo "  clean [-b bridge] [-n ns]                              Clean up all resources"
+    exit 1
+}
+
+# Parse options for commands
+parse_options() {
+    local cmd=$1
+    shift
+    case $cmd in
+        compile)
+            while getopts "s:b:" opt; do
+                case $opt in
+                    s) SRC_DIR="$OPTARG";;
+                    b) BUILD_DIR="$OPTARG";;
+                    *) usage;;
+                esac
+            done
+            ;;
+        load)
+            while getopts "d:m:p:" opt; do
+                case $opt in
+                    d) NS_OUTER_DEV="$OPTARG";;
+                    m) MAP_PATH="$OPTARG";;
+                    p) PROG_PATH="$OPTARG";;
+                    *) usage;;
+                esac
+            done
+            ;;
+        load-inner)
+            while getopts "d:m:p:" opt; do
+                case $opt in
+                    d) NS_INNER_DEV="$OPTARG";;
+                    m) MAP_PATH="$OPTARG";;
+                    p) PROG_PATH="$OPTARG";;
+                    *) usage;;
+                esac
+            done
+            ;;
+        unload)
+            while getopts "d:m:p:" opt; do
+                case $opt in
+                    d) NS_OUTER_DEV="$OPTARG";;
+                    m) MAP_PATH="$OPTARG";;
+                    p) PROG_PATH="$OPTARG";;
+                    *) usage;;
+                esac
+            done
+            ;;
+        setup-vm)
+            while getopts "b:i:" opt; do
+                case $opt in
+                    b) BRIDGE="$OPTARG";;
+                    i) VM_IMAGE="$OPTARG";;
+                    *) usage;;
+                esac
+            done
+            ;;
+        setup-ns)
+            while getopts "n:o:i:a:b:" opt; do
+                case $opt in
+                    n) NS="$OPTARG";;
+                    o) NS_OUTER_DEV="$OPTARG";;
+                    i) NS_INNER_DEV="$OPTARG";;
+                    a) IP_OUTER="$OPTARG";;
+                    b) IP_INNER="$OPTARG";;
+                    *) usage;;
+                esac
+            done
+            ;;
+        remove-ns|enter-ns)
+            while getopts "n:" opt; do
+                case $opt in
+                    n) NS="$OPTARG";;
+                    *) usage;;
+                esac
+            done
+            ;;
+        config)
+            while getopts "n:p:f:t:m:" opt; do
+                case $opt in
+                    n) IFNAME="$OPTARG";;
+                    p) IN_PORT="$OPTARG";;
+                    f) MIN_PORT="$OPTARG";;
+                    t) MAX_PORT="$OPTARG";;
+                    *) echo $opt;;
+                esac
+            done
+            ;;
+        clean)
+            while getopts "b:n:" opt; do
+                case $opt in
+                    b) BRIDGE="$OPTARG";;
+                    n) NS="$OPTARG";;
+                    *) usage;;
+                esac
+            done
+            ;;
+        *) usage;;
+    esac
+}
+
+# Compile BPF and userspace programs
+compile() {
+    mkdir -p "$BUILD_DIR"
+    clang -O2 -Wall -g -target bpf -c "$SRC_DIR/hopper.bpf.c" -o "$BUILD_DIR/hopper.bpf.o"
+    clang -O2 -Wall -g $(pkg-config --libs --cflags libbpf) "$SRC_DIR/user.c" -o "$BUILD_DIR/user"
+    echo "Compilation successful"
+}
+
+# Load and attach BPF programs
+load_bpf() {
+    local dev="$1"
+    sudo mkdir -p "$MAP_PATH" "$PROG_PATH"
+    sudo bpftool prog loadall "$BUILD_DIR/hopper.bpf.o" "$PROG_PATH" pinmaps "$MAP_PATH"
+    sudo bpftool net attach tcx_ingress pinned "$PROG_PATH/tc_port_hopper_ingress" dev "$dev"
+    sudo bpftool net attach tcx_egress pinned "$PROG_PATH/tc_port_hopper_egress" dev "$dev"
+    sudo "$BUILD_DIR/user"
+    echo "BPF programs loaded on $dev"
+}
+
+# Unload BPF programs
+unload_bpf() {
+    local dev="$1"
+    sudo bpftool net detach tcx_ingress dev "$dev" 2>/dev/null
+    sudo bpftool net detach tcx_egress dev "$dev" 2>/dev/null
+    sudo rm -rf /sys/fs/bpf/hopper/ 2>/dev/null
+    echo "BPF programs unloaded"
+}
+
+# Set up VMs and bridge
+setup_vm() {
+    sudo ip link add "$BRIDGE" type bridge
+    sudo ip link set dev "$BRIDGE" up
+    for i in 0 1; do
+        sudo qemu-kvm --enable-kvm -m 1G -hda "$VM_IMAGE" -snapshot -daemonize \
+            -device e1000,mac="aa:54:00:00:00:9${i},netdev=lan${i},id=lan${i}" \
+            -netdev tap,id=lan${i},ifname=tap${i},script=no,downscript=no
+        sudo ip link set dev tap${i} master "$BRIDGE"
+        sudo ip link set dev tap${i} up
+    done
+    sudo ip addr add 192.168.1.1/24 dev "$BRIDGE"
+    echo "VMs and bridge configured"
+}
+
+# Set up network namespace
+setup_ns() {
+    sudo ip netns add "$NS"
+    sudo ip link add dev "$NS_OUTER_DEV" type veth peer "$NS_INNER_DEV" netns "$NS"
+    sudo ip link set "$NS_OUTER_DEV" up
+    sudo ip addr add "$IP_OUTER" dev "$NS_OUTER_DEV"
+    sudo ip netns exec "$NS" ip link set "$NS_INNER_DEV" up
+    sudo ip netns exec "$NS" ip addr add "$IP_INNER" dev "$NS_INNER_DEV"
+    sudo ip netns exec "$NS" tc qdisc add dev "$NS_INNER_DEV" clsact
+    sudo tc qdisc add dev "$NS_OUTER_DEV" clsact
+    sudo mkdir -p /var/run/netns/bpf
+    sudo mount --bind /sys/fs/bpf/ /var/run/netns/bpf
+    echo "Namespace $NS configured"
+}
+
+# Remove network namespace
+remove_ns() {
+    unload_bpf "$NS_OUTER_DEV"
+    sudo umount /var/run/netns/bpf 2>/dev/null
+    sudo ip netns delete "$NS" 2>/dev/null
+    echo "Namespace $NS removed"
+}
+
+# Enter network namespace
+enter_ns() {
+    sudo ip netns exec "$NS" bash -c "mount --bind /var/run/netns/bpf/ /sys/fs/bpf/; env PS1='# ' bash"
+}
+
+# Configure BPF map
+config_map() {
+    [ -z "$IFNAME" ] || [ -z "$IN_PORT" ] || [ -z "$MIN_PORT" ] || [ -z "$MAX_PORT" ] && \
+        { echo "Missing required options for config"; usage; }
+    echo "Map $MAP_NAME updated for interface $IFNAME (ifindex: $ifindex)"
+}
+
+# Clean up all resources
+clean() {
+    remove_ns
+    sudo ip link delete "$BRIDGE" 2>/dev/null
+    rm -rf "$BUILD_DIR"/*.o
+    echo "All resources cleaned"
+}
+
+# Main command dispatcher
+[ $# -eq 0 ] && usage
+cmd="$1"
+shift
+parse_options "$cmd" "$@"
+case "$cmd" in
+    compile) compile;;
+    load) unload_bpf "$NS_OUTER_DEV"; compile; load_bpf "$NS_OUTER_DEV";;
+    load-inner) unload_bpf "$NS_INNER_DEV"; load_bpf "$NS_INNER_DEV";;
+    unload) unload_bpf "$NS_OUTER_DEV"; unload_bpf "$NS_INNER_DEV";;
+    setup-vm) clean; setup_vm;;
+    setup-ns) remove_ns; setup_ns;;
+    remove-ns) remove_ns;;
+    enter-ns) enter_ns;;
+    config) config_map;;
+    clean) clean;;
+    *) usage;;
+esac
