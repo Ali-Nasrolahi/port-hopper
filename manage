@@ -9,7 +9,6 @@ PROG_PATH="/sys/fs/bpf/hopper/prog"
 BRIDGE="br0"
 VM_IMAGE="iso/alpine.img"
 BUILD_DIR="build"
-SRC_DIR="src"
 IP_OUTER="192.168.1.1/24"
 IP_INNER="192.168.1.2/24"
 MAP_NAME="config"
@@ -17,17 +16,18 @@ MAP_NAME="config"
 usage() {
     echo "Usage: $0 [command] [options]"
     echo "Commands and options:"
-    echo "  compile [-s src_dir] [-b build_dir]                    Compile BPF and userspace programs"
-    echo "  load [-d outer_dev] [-m map_path] [-p prog_path]       Load/attach BPF to outer interface"
-    echo "  load-inner [-d inner_dev] [-m map_path] [-p prog_path] Load/attach BPF to inner interface"
-    echo "  unload [-d dev] [-m map_path] [-p prog_path]           Unload BPF programs"
-    echo "  setup-vm [-b bridge] [-i image]                        Set up Linux bridge and QEMU VMs"
+    echo "  load [-o outer_dev] [-i inner_dev] [-m map_path] [-p prog_path]         Load/attach BPF to outer interface"
+    echo "  unload [-o outer_dev] [-i inner_dev] [-m map_path] [-p prog_path]       Unload BPF programs"
+    echo "  setup-vm [-b bridge] [-i image]                                         Set up Linux bridge and QEMU VMs"
     echo "  setup-ns [-n ns] [-o outer_dev] [-i inner_dev] [-a outer_ip] [-b inner_ip] Create namespace"
-    echo "  remove-ns [-n ns]                                      Remove network namespace"
-    echo "  enter-ns [-n ns]                                       Enter network namespace"
-    echo "  config [-n ifname] [-p in_port] [-f min_port] [-t max_port] Configure BPF map"
-    echo "  clean [-b bridge] [-n ns]                              Clean up all resources"
+    echo "  remove-ns [-n ns]                                                       Remove network namespace"
+    echo "  enter-ns [-n ns]                                                        Enter network namespace"
+    echo "  clean [-b bridge] [-n ns]                                               Clean up all resources"
     exit 1
+}
+
+compile() {
+    make all
 }
 
 # Parse options for commands
@@ -35,29 +35,11 @@ parse_options() {
     local cmd=$1
     shift
     case $cmd in
-        compile)
-            while getopts "s:b:" opt; do
-                case $opt in
-                    s) SRC_DIR="$OPTARG";;
-                    b) BUILD_DIR="$OPTARG";;
-                    *) usage;;
-                esac
-            done
-            ;;
         load)
-            while getopts "d:m:p:" opt; do
+            while getopts "o:i:m:p:" opt; do
                 case $opt in
-                    d) NS_OUTER_DEV="$OPTARG";;
-                    m) MAP_PATH="$OPTARG";;
-                    p) PROG_PATH="$OPTARG";;
-                    *) usage;;
-                esac
-            done
-            ;;
-        load-inner)
-            while getopts "d:m:p:" opt; do
-                case $opt in
-                    d) NS_INNER_DEV="$OPTARG";;
+                    o) NS_OUTER_DEV="$OPTARG";;
+                    i) NS_INNER_DEV="$OPTARG";;
                     m) MAP_PATH="$OPTARG";;
                     p) PROG_PATH="$OPTARG";;
                     *) usage;;
@@ -65,9 +47,10 @@ parse_options() {
             done
             ;;
         unload)
-            while getopts "d:m:p:" opt; do
+            while getopts "o:i:m:p:" opt; do
                 case $opt in
-                    d) NS_OUTER_DEV="$OPTARG";;
+                    o) NS_OUTER_DEV="$OPTARG";;
+                    i) NS_INNER_DEV="$OPTARG";;
                     m) MAP_PATH="$OPTARG";;
                     p) PROG_PATH="$OPTARG";;
                     *) usage;;
@@ -127,32 +110,36 @@ parse_options() {
     esac
 }
 
-# Compile BPF and userspace programs
-compile() {
-    mkdir -p "$BUILD_DIR"
-    clang -O2 -Wall -g -target bpf -c "$SRC_DIR/hopper.bpf.c" -o "$BUILD_DIR/hopper.bpf.o"
-    clang -O2 -Wall -g $(pkg-config --libs --cflags libbpf) "$SRC_DIR/user.c" -o "$BUILD_DIR/user"
-    echo "Compilation successful"
-}
-
 # Load and attach BPF programs
 load_bpf() {
     local dev="$1"
-    sudo mkdir -p "$MAP_PATH" "$PROG_PATH"
-    sudo bpftool prog loadall "$BUILD_DIR/hopper.bpf.o" "$PROG_PATH" pinmaps "$MAP_PATH"
-    sudo bpftool net attach tcx_ingress pinned "$PROG_PATH/tc_port_hopper_ingress" dev "$dev"
-    sudo bpftool net attach tcx_egress pinned "$PROG_PATH/tc_port_hopper_egress" dev "$dev"
-    sudo "$BUILD_DIR/user"
+    if [ "$dev" = "$NS_INNER_DEV" ]; then
+        sudo mkdir -p "$MAP_PATH" "$PROG_PATH"
+        sudo ip netns exec "$NS" bpftool prog loadall "$BUILD_DIR/hopper.bpf.o" "$PROG_PATH" pinmaps "$MAP_PATH"
+        sudo ip netns exec "$NS" bpftool net attach tcx_ingress pinned "$PROG_PATH/tc_port_hopper_ingress" dev "$dev"
+        sudo ip netns exec "$NS" bpftool net attach tcx_egress pinned "$PROG_PATH/tc_port_hopper_egress" dev "$dev"
+    else
+        sudo mkdir -p "$MAP_PATH" "$PROG_PATH"
+        sudo bpftool prog loadall "$BUILD_DIR/hopper.bpf.o" "$PROG_PATH" pinmaps "$MAP_PATH"
+        sudo bpftool net attach tcx_ingress pinned "$PROG_PATH/tc_port_hopper_ingress" dev "$dev"
+        sudo bpftool net attach tcx_egress pinned "$PROG_PATH/tc_port_hopper_egress" dev "$dev"
+    fi
     echo "BPF programs loaded on $dev"
 }
 
 # Unload BPF programs
 unload_bpf() {
     local dev="$1"
-    sudo bpftool net detach tcx_ingress dev "$dev" 2>/dev/null
-    sudo bpftool net detach tcx_egress dev "$dev" 2>/dev/null
-    sudo rm -rf /sys/fs/bpf/hopper/ 2>/dev/null
-    echo "BPF programs unloaded"
+    if [ "$dev" = "$NS_INNER_DEV" ]; then
+        sudo ip netns exec "$NS" bpftool net detach tcx_ingress dev "$dev" 2>/dev/null
+        sudo ip netns exec "$NS" bpftool net detach tcx_egress dev "$dev" 2>/dev/null
+        sudo ip netns exec "$NS" rm -rf /sys/fs/bpf/hopper/ 2>/dev/null
+    else
+        sudo bpftool net detach tcx_ingress dev "$dev" 2>/dev/null
+        sudo bpftool net detach tcx_egress dev "$dev" 2>/dev/null
+        sudo rm -rf /sys/fs/bpf/hopper/ 2>/dev/null
+    fi
+    echo "BPF programs unloaded from $dev"
 }
 
 # Set up VMs and bridge
@@ -171,15 +158,15 @@ setup_vm() {
 }
 
 # Set up network namespace
-setup_ns() {
+_setup_ns() {
     sudo ip netns add "$NS"
     sudo ip link add dev "$NS_OUTER_DEV" type veth peer "$NS_INNER_DEV" netns "$NS"
     sudo ip link set "$NS_OUTER_DEV" up
     sudo ip addr add "$IP_OUTER" dev "$NS_OUTER_DEV"
+    sudo tc qdisc add dev "$NS_OUTER_DEV" clsact
     sudo ip netns exec "$NS" ip link set "$NS_INNER_DEV" up
     sudo ip netns exec "$NS" ip addr add "$IP_INNER" dev "$NS_INNER_DEV"
     sudo ip netns exec "$NS" tc qdisc add dev "$NS_INNER_DEV" clsact
-    sudo tc qdisc add dev "$NS_OUTER_DEV" clsact
     sudo mkdir -p /var/run/netns/bpf
     sudo mount --bind /sys/fs/bpf/ /var/run/netns/bpf
     echo "Namespace $NS configured"
@@ -188,6 +175,7 @@ setup_ns() {
 # Remove network namespace
 remove_ns() {
     unload_bpf "$NS_OUTER_DEV"
+    unload_bpf "$NS_INNER_DEV"
     sudo umount /var/run/netns/bpf 2>/dev/null
     sudo ip netns delete "$NS" 2>/dev/null
     echo "Namespace $NS removed"
@@ -196,13 +184,6 @@ remove_ns() {
 # Enter network namespace
 enter_ns() {
     sudo ip netns exec "$NS" bash -c "mount --bind /var/run/netns/bpf/ /sys/fs/bpf/; env PS1='# ' bash"
-}
-
-# Configure BPF map
-config_map() {
-    [ -z "$IFNAME" ] || [ -z "$IN_PORT" ] || [ -z "$MIN_PORT" ] || [ -z "$MAX_PORT" ] && \
-        { echo "Missing required options for config"; usage; }
-    echo "Map $MAP_NAME updated for interface $IFNAME (ifindex: $ifindex)"
 }
 
 # Clean up all resources
@@ -219,15 +200,12 @@ cmd="$1"
 shift
 parse_options "$cmd" "$@"
 case "$cmd" in
-    compile) compile;;
-    load) unload_bpf "$NS_OUTER_DEV"; compile; load_bpf "$NS_OUTER_DEV";;
-    load-inner) unload_bpf "$NS_INNER_DEV"; load_bpf "$NS_INNER_DEV";;
+    load)  unload_bpf "$NS_OUTER_DEV"; unload_bpf "$NS_INNER_DEV"; load_bpf "$NS_OUTER_DEV"; load_bpf "$NS_INNER_DEV";;
     unload) unload_bpf "$NS_OUTER_DEV"; unload_bpf "$NS_INNER_DEV";;
     setup-vm) clean; setup_vm;;
     setup-ns) remove_ns; setup_ns;;
     remove-ns) remove_ns;;
     enter-ns) enter_ns;;
-    config) config_map;;
     clean) clean;;
     *) usage;;
 esac

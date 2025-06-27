@@ -5,16 +5,20 @@ MAP_PATH=/sys/fs/bpf/hopper/map
 PROG_PATH=/sys/fs/bpf/hopper/prog
 
 all:
-	clang -O2 -Wall -g -target bpf -c src/hopper.bpf.c -o build/hopper.bpf.o
-	clang -O2 -Wall -g $(shell pkg-config --libs --cflags libbpf) src/user.c -o build/user
+	clang -O2 -Wall -g -target bpf -c src/bpf/hopper.bpf.c -o build/hopper.bpf.o
+	clang -O2 -Wall -g $(shell pkg-config --libs --cflags libbpf) src/bpf/user.c -o build/user
+	go build -C src/ -o ../build/hopper
+
 
 xl: xun all
 	sudo mkdir -p $(MAP_PATH) $(PROG_PATH)
 	sudo bpftool prog loadall build/hopper.bpf.o $(PROG_PATH) pinmaps $(MAP_PATH)
 	@sudo bpftool net attach tcx_ingress pinned $(PROG_PATH)/tc_port_hopper_ingress dev $(NS_OUTER_DEV)
 	@sudo bpftool net attach tcx_egress  pinned $(PROG_PATH)/tc_port_hopper_egress   dev $(NS_OUTER_DEV)
-	@sudo ./build/user
+	@sudo build/hopper config -ifname outer_veth -inbound 8080 -min 9000 -max 9999
+	@sudo ip netns exec $(NS) bash -c "mount --bind /var/run/netns/bpf/ /sys/fs/bpf/; make xin;"
 	@echo -e '\nLoad Success\n'
+	@sudo build/hopper dump
 
 vm: vm_clean
 	sudo ip l a br0 type bridge
@@ -35,7 +39,7 @@ xin:
 	- @sudo bpftool net detach tcx_egress dev $(NS_INNER_DEV)
 	@sudo bpftool net attach tcx_ingress pinned $(PROG_PATH)/tc_port_hopper_ingress dev $(NS_INNER_DEV)
 	@sudo bpftool net attach tcx_egress  pinned $(PROG_PATH)/tc_port_hopper_egress   dev $(NS_INNER_DEV)
-	@echo -e '\nInternal Load Success\n'
+	@sudo ./build/hopper config -ifname $(NS_INNER_DEV) -inbound 8080 -min 9000 -max 9999
 
 xun:
 	- @sudo bpftool net detach tcx_ingress dev $(NS_OUTER_DEV)

@@ -11,7 +11,7 @@
 
 #define CONFIG_MAP "/sys/fs/bpf/hopper/map/config"
 
-#define IFNAME "inner_veth"
+#define IFNAME "outer_veth"
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
