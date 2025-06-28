@@ -3,11 +3,23 @@ NS_OUTER_DEV=outer_veth
 NS_INNER_DEV=inner_veth
 MAP_PATH=/sys/fs/bpf/hopper/map
 PROG_PATH=/sys/fs/bpf/hopper/prog
+DEV=inner_veth
+DEV=outer_veth
 
 all:
 	clang -O2 -Wall -g -target bpf -c src/bpf/hopper.bpf.c -o build/hopper.bpf.o
-	clang -O2 -Wall -g $(shell pkg-config --libs --cflags libbpf) src/bpf/user.c -o build/user
+	go generate -C src/
 	go build -C src/ -o ../build/hopper
+#clang -O2 -Wall -g $(shell pkg-config --libs --cflags libbpf) src/bpf/user.c -o build/user
+
+attach: all detach
+	sudo ./build/hopper load
+	sudo ./build/hopper legacy_attach --device $(DEV)
+
+detach:
+	- sudo ./build/hopper unload
+	- sudo tc filter del dev $(DEV) ingress
+	- sudo tc filter del dev $(DEV) egress
 
 
 xl: xun all
@@ -15,7 +27,7 @@ xl: xun all
 	sudo bpftool prog loadall build/hopper.bpf.o $(PROG_PATH) pinmaps $(MAP_PATH)
 	@sudo bpftool net attach tcx_ingress pinned $(PROG_PATH)/tc_port_hopper_ingress dev $(NS_OUTER_DEV)
 	@sudo bpftool net attach tcx_egress  pinned $(PROG_PATH)/tc_port_hopper_egress   dev $(NS_OUTER_DEV)
-	@sudo build/hopper config -ifname outer_veth -inbound 8080 -min 9000 -max 9999
+	@sudo build/hopper config -device $(NS_OUTER_DEV) -inbound 8080 -min 9000 -max 9999
 	@sudo ip netns exec $(NS) bash -c "mount --bind /var/run/netns/bpf/ /sys/fs/bpf/; make xin;"
 	@echo -e '\nLoad Success\n'
 	@sudo build/hopper dump
@@ -39,7 +51,7 @@ xin:
 	- @sudo bpftool net detach tcx_egress dev $(NS_INNER_DEV)
 	@sudo bpftool net attach tcx_ingress pinned $(PROG_PATH)/tc_port_hopper_ingress dev $(NS_INNER_DEV)
 	@sudo bpftool net attach tcx_egress  pinned $(PROG_PATH)/tc_port_hopper_egress   dev $(NS_INNER_DEV)
-	@sudo ./build/hopper config -ifname $(NS_INNER_DEV) -inbound 8080 -min 9000 -max 9999
+	@sudo ./build/hopper config -device $(NS_INNER_DEV) -inbound 8080 -min 9000 -max 9999
 
 xun:
 	- @sudo bpftool net detach tcx_ingress dev $(NS_OUTER_DEV)

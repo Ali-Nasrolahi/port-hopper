@@ -158,7 +158,7 @@ setup_vm() {
 }
 
 # Set up network namespace
-_setup_ns() {
+setup_ns() {
     sudo ip netns add "$NS"
     sudo ip link add dev "$NS_OUTER_DEV" type veth peer "$NS_INNER_DEV" netns "$NS"
     sudo ip link set "$NS_OUTER_DEV" up

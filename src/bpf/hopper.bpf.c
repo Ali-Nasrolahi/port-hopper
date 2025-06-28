@@ -46,7 +46,7 @@ static __always_inline int verify_n_parse(struct hopper_opt* opt, void* data, vo
             bpf_ntohs((*eth)->h_proto) != ETH_P_IP || (*ip)->protocol != IPPROTO_TCP);
 }
 
-SEC("tc")
+SEC("tcx/egress")
 int tc_port_hopper_egress(struct __sk_buff* ctx)
 {
     struct ethhdr* eth;
@@ -80,7 +80,7 @@ static __always_inline int in_range(struct hopper_opt* opt, __be16 port)
     return port < opt->max_p && port >= opt->min_p;
 }
 
-SEC("tc")
+SEC("tcx/ingress")
 int tc_port_hopper_ingress(struct __sk_buff* ctx)
 {
     struct ethhdr* eth;
