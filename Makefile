@@ -32,12 +32,16 @@ xl: xun all
 	@echo -e '\nLoad Success\n'
 	@sudo build/hopper dump
 
+
+_vm:
+	qemu-kvm --enable-kvm -cpu host -smp 2 -m 2G -hda iso/rhel9.img -nic user -daemonize
+
 vm: vm_clean
 	sudo ip l a br0 type bridge
 	sudo ip l s dev br0 up
-	sudo qemu-kvm --enable-kvm -m 1G -hda iso/alpine.img -snapshot -daemonize \
+	sudo qemu-kvm --enable-kvm -cpu host -m 1G -hda iso/alpine.img -snapshot -daemonize \
 		-device e1000,mac=aa:54:00:00:00:91,netdev=lan,id=lan -netdev tap,id=lan,ifname=tap0,script=no,downscript=no
-	sudo qemu-kvm --enable-kvm -m 1G -hda iso/alpine.img -snapshot -daemonize \
+	sudo qemu-kvm --enable-kvm -cpu host -m 1G -hda iso/alpine.img -snapshot -daemonize \
 		-device e1000,mac=ee:55:00:00:00:91,netdev=lan,id=lan -netdev tap,id=lan,ifname=tap1,script=no,downscript=no
 	sudo ip l s dev tap0 master br0
 	sudo ip l s dev tap1 master br0

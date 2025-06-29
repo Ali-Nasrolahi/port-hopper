@@ -242,7 +242,9 @@ func tc_attach() {
 		Msg: tc.Msg{
 			Family:  unix.AF_UNSPEC,
 			Ifindex: uint32(netif.Index),
-			Parent:  tc.HandleRoot,
+			Handle:  core.BuildHandle(tc.HandleRoot, 0),
+			Parent:  tc.HandleIngress,
+			Info:    0,
 		},
 		Attribute: tc.Attribute{
 			Kind: "clsact",
@@ -250,14 +252,13 @@ func tc_attach() {
 	}
 
 	tcnl.Qdisc().Add(&qdisc)
-
 	fd := uint32(p_ingress.FD())
-	flags := uint32(0x1)
+	flags := uint32(1)
 	filter := tc.Object{
 		Msg: tc.Msg{
 			Family:  unix.AF_UNSPEC,
-			Ifindex: uint32(netif.Index),
 			Handle:  0,
+			Ifindex: uint32(netif.Index),
 			Parent:  core.BuildHandle(tc.HandleRoot, tc.HandleMinIngress),
 			Info:    0x300,
 		},
@@ -273,7 +274,6 @@ func tc_attach() {
 	must(tcnl.Filter().Add(&filter))
 
 	fd = uint32(p_egress.FD())
-	filter.Attribute.BPF.FD = &fd
 	filter.Msg.Parent = core.BuildHandle(tc.HandleRoot, tc.HandleMinEgress)
 
 	must(tcnl.Filter().Add(&filter))
