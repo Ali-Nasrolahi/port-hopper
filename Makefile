@@ -3,8 +3,7 @@ NS_OUTER_DEV=outer_veth
 NS_INNER_DEV=inner_veth
 MAP_PATH=/sys/fs/bpf/hopper/map
 PROG_PATH=/sys/fs/bpf/hopper/prog
-DEV=inner_veth
-DEV=outer_veth
+DEV=dum0
 
 all:
 	clang -O2 -Wall -g -target bpf -c src/bpf/hopper.bpf.c -o build/hopper.bpf.o

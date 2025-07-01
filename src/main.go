@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	bpf "github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	tc "github.com/florianl/go-tc"
 	"github.com/florianl/go-tc/core"
 	"golang.org/x/sys/unix"
@@ -22,6 +23,7 @@ const (
 	MAP_DIR      = (HOP_BPF_DIR + "map/")
 	MAP_CONF     = (MAP_DIR + "config")
 	PROG_DIR     = (HOP_BPF_DIR + "prog/")
+	LINK_DIR     = (HOP_BPF_DIR + "link/")
 	PROG_EGRESS  = (PROG_DIR + "egress")
 	PROG_INGRESS = (PROG_DIR + "ingress")
 )
@@ -47,8 +49,14 @@ func main() {
 		load()
 	case "unload":
 		unload()
+	case "attach":
+		attach()
+	case "detach":
+		detach()
 	case "legacy_attach":
 		tc_attach()
+	// case "legacy_detach":
+	// tc_detach()
 	default:
 		help()
 	}
@@ -62,10 +70,14 @@ func must(e error) {
 
 func help() {
 	fmt.Fprintln(os.Stderr, "Usage: hopper <command> [options]")
-	fmt.Fprintln(os.Stderr, "Commands: config, dump, load, unload, legacy_attach")
+	fmt.Fprintln(os.Stderr, "Commands: load, unload, config, dump, attach, detach, legacy_attach")
+	fmt.Fprintln(os.Stderr, "  load")
+	fmt.Fprintln(os.Stderr, "  unload")
+	fmt.Fprintln(os.Stderr, "  attach --device <interface>")
+	fmt.Fprintln(os.Stderr, "  detach --device <interface>")
 	fmt.Fprintln(os.Stderr, "  config --device <interface> --inbound N --min N --max N [--map PATH]")
-	fmt.Fprintln(os.Stderr, "  dump [--map PATH]")
 	fmt.Fprintln(os.Stderr, "  legacy_attach --device <interface>")
+	fmt.Fprintln(os.Stderr, "  dump [--map PATH]")
 	os.Exit(1)
 }
 
@@ -181,6 +193,7 @@ func config() {
 func load() {
 	must(os.MkdirAll(MAP_DIR, os.ModeDir))
 	must(os.MkdirAll(PROG_DIR, os.ModeDir))
+	must(os.MkdirAll(LINK_DIR, os.ModeDir))
 
 	var objs hopperObjects
 	must(loadHopperObjects(&objs, nil))
@@ -213,7 +226,7 @@ func unload() {
 	must(os.RemoveAll(HOP_BPF_DIR))
 }
 
-func tc_attach() {
+func _device_fl() *net.Interface {
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
 	dev := fs.String("device", "", "Device to attach the program")
 	if err := fs.Parse(os.Args[2:]); err != nil {
@@ -224,8 +237,67 @@ func tc_attach() {
 		log.Fatal("Specify the device!")
 	}
 
-	netif, err := net.InterfaceByName(*dev)
+	iface, err := net.InterfaceByName(*dev)
 	must(err)
+
+	return iface
+}
+
+func attach() {
+	iface := _device_fl()
+	p_ingress, err := bpf.LoadPinnedProgram(PROG_INGRESS, nil)
+	must(err)
+	defer p_ingress.Close()
+	p_egress, err := bpf.LoadPinnedProgram(PROG_EGRESS, nil)
+	must(err)
+	defer p_egress.Close()
+
+	tcnl, err := tc.Open(&tc.Config{})
+	must(err)
+	defer tcnl.Close()
+
+	// Ensure clsact is enabled for tcx hooks
+	tcnl.Qdisc().Add(&tc.Object{
+		Msg: tc.Msg{
+			Family:  unix.AF_UNSPEC,
+			Ifindex: uint32(iface.Index),
+			Handle:  core.BuildHandle(tc.HandleRoot, 0),
+			Parent:  tc.HandleIngress,
+			Info:    0,
+		},
+		Attribute: tc.Attribute{
+			Kind: "clsact",
+		},
+	})
+
+	l, err := link.AttachTCX(link.TCXOptions{
+		Interface: iface.Index,
+		Program:   p_ingress,
+		Attach:    bpf.AttachTCXIngress,
+	})
+	must(err)
+	defer l.Close()
+	must(l.Pin(fmt.Sprintf("%s/%s-ingress", LINK_DIR, iface.Name)))
+
+	l.Close()
+	l, err = link.AttachTCX(link.TCXOptions{
+		Interface: iface.Index,
+		Program:   p_egress,
+		Attach:    bpf.AttachTCXEgress,
+	})
+	must(err)
+	must(l.Pin(fmt.Sprintf("%s/%s-egress", LINK_DIR, iface.Name)))
+}
+
+func detach() {
+	iface := _device_fl()
+	os.Remove(fmt.Sprintf("%s/%s-ingress", LINK_DIR, iface.Name))
+	os.Remove(fmt.Sprintf("%s/%s-egress", LINK_DIR, iface.Name))
+}
+
+func tc_attach() {
+
+	iface := _device_fl()
 
 	p_ingress, err := bpf.LoadPinnedProgram(PROG_INGRESS, nil)
 	must(err)
@@ -241,7 +313,7 @@ func tc_attach() {
 	qdisc := tc.Object{
 		Msg: tc.Msg{
 			Family:  unix.AF_UNSPEC,
-			Ifindex: uint32(netif.Index),
+			Ifindex: uint32(iface.Index),
 			Handle:  core.BuildHandle(tc.HandleRoot, 0),
 			Parent:  tc.HandleIngress,
 			Info:    0,
@@ -258,7 +330,7 @@ func tc_attach() {
 		Msg: tc.Msg{
 			Family:  unix.AF_UNSPEC,
 			Handle:  0,
-			Ifindex: uint32(netif.Index),
+			Ifindex: uint32(iface.Index),
 			Parent:  core.BuildHandle(tc.HandleRoot, tc.HandleMinIngress),
 			Info:    0x300,
 		},
@@ -277,4 +349,38 @@ func tc_attach() {
 	filter.Msg.Parent = core.BuildHandle(tc.HandleRoot, tc.HandleMinEgress)
 
 	must(tcnl.Filter().Add(&filter))
+}
+
+func tc_detach() {
+
+	iface := _device_fl()
+
+	tcnl, err := tc.Open(&tc.Config{})
+	must(err)
+	defer tcnl.Close()
+
+	name := "tc_port_hoppedar_egress"
+	obj := tc.Object{
+		Msg: tc.Msg{
+			Family:  unix.AF_UNSPEC,
+			Ifindex: uint32(iface.Index),
+			Handle:  0x1,
+			Parent:  tc.HandleMinEgress,
+			Info:    (unix.ETH_P_ALL << 16),
+		},
+		Attribute: tc.Attribute{
+			Kind: "bpf",
+			BPF: &tc.Bpf{
+				Name: &name,
+			},
+		},
+	}
+
+	err = tcnl.Filter().Delete(&obj)
+	if err != nil {
+		log.Fatalf("Failed to delete filter: %v", err)
+	}
+
+	fmt.Println("Deleted BPF filter with handle", 0x1)
+
 }

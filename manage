@@ -1,28 +1,21 @@
 #!/bin/bash
-
-# Default configuration
 NS="port-hopper-namespace"
 NS_OUTER_DEV="outer_veth"
 NS_INNER_DEV="inner_veth"
-MAP_PATH="/sys/fs/bpf/hopper/map"
-PROG_PATH="/sys/fs/bpf/hopper/prog"
 BRIDGE="br0"
 VM_IMAGE="iso/alpine.img"
 BUILD_DIR="build"
 IP_OUTER="192.168.1.1/24"
 IP_INNER="192.168.1.2/24"
-MAP_NAME="config"
 
 usage() {
     echo "Usage: $0 [command] [options]"
     echo "Commands and options:"
-    echo "  load [-o outer_dev] [-i inner_dev] [-m map_path] [-p prog_path]         Load/attach BPF to outer interface"
-    echo "  unload [-o outer_dev] [-i inner_dev] [-m map_path] [-p prog_path]       Unload BPF programs"
-    echo "  setup-vm [-b bridge] [-i image]                                         Set up Linux bridge and QEMU VMs"
-    echo "  setup-ns [-n ns] [-o outer_dev] [-i inner_dev] [-a outer_ip] [-b inner_ip] Create namespace"
-    echo "  remove-ns [-n ns]                                                       Remove network namespace"
-    echo "  enter-ns [-n ns]                                                        Enter network namespace"
-    echo "  clean [-b bridge] [-n ns]                                               Clean up all resources"
+    echo "  setup-ns [-n ns] [-o outer_dev] [-i inner_dev]  Create namespace"
+    echo "  remove-ns [-n ns]                               Remove network namespace"
+    echo "  enter-ns [-n ns]                                Enter network namespace"
+    echo "  setup-vm [-b bridge] [-i image                  Set up Linux bridge and QEMU VMs"
+    echo "  clean [-b bridge] [-n ns]                       Clean up all resources"
     exit 1
 }
 
@@ -35,28 +28,6 @@ parse_options() {
     local cmd=$1
     shift
     case $cmd in
-        load)
-            while getopts "o:i:m:p:" opt; do
-                case $opt in
-                    o) NS_OUTER_DEV="$OPTARG";;
-                    i) NS_INNER_DEV="$OPTARG";;
-                    m) MAP_PATH="$OPTARG";;
-                    p) PROG_PATH="$OPTARG";;
-                    *) usage;;
-                esac
-            done
-            ;;
-        unload)
-            while getopts "o:i:m:p:" opt; do
-                case $opt in
-                    o) NS_OUTER_DEV="$OPTARG";;
-                    i) NS_INNER_DEV="$OPTARG";;
-                    m) MAP_PATH="$OPTARG";;
-                    p) PROG_PATH="$OPTARG";;
-                    *) usage;;
-                esac
-            done
-            ;;
         setup-vm)
             while getopts "b:i:" opt; do
                 case $opt in
@@ -72,8 +43,6 @@ parse_options() {
                     n) NS="$OPTARG";;
                     o) NS_OUTER_DEV="$OPTARG";;
                     i) NS_INNER_DEV="$OPTARG";;
-                    a) IP_OUTER="$OPTARG";;
-                    b) IP_INNER="$OPTARG";;
                     *) usage;;
                 esac
             done
@@ -83,17 +52,6 @@ parse_options() {
                 case $opt in
                     n) NS="$OPTARG";;
                     *) usage;;
-                esac
-            done
-            ;;
-        config)
-            while getopts "n:p:f:t:m:" opt; do
-                case $opt in
-                    n) IFNAME="$OPTARG";;
-                    p) IN_PORT="$OPTARG";;
-                    f) MIN_PORT="$OPTARG";;
-                    t) MAX_PORT="$OPTARG";;
-                    *) echo $opt;;
                 esac
             done
             ;;
@@ -108,38 +66,6 @@ parse_options() {
             ;;
         *) usage;;
     esac
-}
-
-# Load and attach BPF programs
-load_bpf() {
-    local dev="$1"
-    if [ "$dev" = "$NS_INNER_DEV" ]; then
-        sudo mkdir -p "$MAP_PATH" "$PROG_PATH"
-        sudo ip netns exec "$NS" bpftool prog loadall "$BUILD_DIR/hopper.bpf.o" "$PROG_PATH" pinmaps "$MAP_PATH"
-        sudo ip netns exec "$NS" bpftool net attach tcx_ingress pinned "$PROG_PATH/tc_port_hopper_ingress" dev "$dev"
-        sudo ip netns exec "$NS" bpftool net attach tcx_egress pinned "$PROG_PATH/tc_port_hopper_egress" dev "$dev"
-    else
-        sudo mkdir -p "$MAP_PATH" "$PROG_PATH"
-        sudo bpftool prog loadall "$BUILD_DIR/hopper.bpf.o" "$PROG_PATH" pinmaps "$MAP_PATH"
-        sudo bpftool net attach tcx_ingress pinned "$PROG_PATH/tc_port_hopper_ingress" dev "$dev"
-        sudo bpftool net attach tcx_egress pinned "$PROG_PATH/tc_port_hopper_egress" dev "$dev"
-    fi
-    echo "BPF programs loaded on $dev"
-}
-
-# Unload BPF programs
-unload_bpf() {
-    local dev="$1"
-    if [ "$dev" = "$NS_INNER_DEV" ]; then
-        sudo ip netns exec "$NS" bpftool net detach tcx_ingress dev "$dev" 2>/dev/null
-        sudo ip netns exec "$NS" bpftool net detach tcx_egress dev "$dev" 2>/dev/null
-        sudo ip netns exec "$NS" rm -rf /sys/fs/bpf/hopper/ 2>/dev/null
-    else
-        sudo bpftool net detach tcx_ingress dev "$dev" 2>/dev/null
-        sudo bpftool net detach tcx_egress dev "$dev" 2>/dev/null
-        sudo rm -rf /sys/fs/bpf/hopper/ 2>/dev/null
-    fi
-    echo "BPF programs unloaded from $dev"
 }
 
 # Set up VMs and bridge
