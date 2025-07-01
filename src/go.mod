@@ -1,6 +1,6 @@
 module hopper
 
-go 1.24.4
+go 1.23.9
 
 require (
 	github.com/cilium/ebpf v0.19.0

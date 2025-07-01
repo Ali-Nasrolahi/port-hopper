@@ -1,0 +1,34 @@
+name: Port Hopper Automatic Build/Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t rocky9-build .
+
+      - name: Create and run container
+        id: container
+        run: |
+          CONTAINER_ID=$(docker create rocky9-build)
+          docker cp $CONTAINER_ID:/build ./build
+          docker rm $CONTAINER_ID
+
+      - name: List outputs
+        run: ls -la ./build
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./build/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

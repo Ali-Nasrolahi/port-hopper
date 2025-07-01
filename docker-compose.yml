@@ -1,7 +1,12 @@
 services:
-  server_build:
+  nginx:
     image: nginx
     volumes:
       - ./build:/usr/share/nginx/html/build:z
     ports:
       - 8080:80
+  rocky:
+    build: .
+    volumes:
+      - ./src:/src:z
+      - ./build:/build:z
