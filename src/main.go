@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
 
 	bpf "github.com/cilium/ebpf"
@@ -55,8 +56,8 @@ func main() {
 		detach()
 	case "legacy_attach":
 		tc_attach()
-	// case "legacy_detach":
-	// tc_detach()
+	case "legacy_detach":
+		tc_detach()
 	default:
 		help()
 	}
@@ -70,13 +71,14 @@ func must(e error) {
 
 func help() {
 	fmt.Fprintln(os.Stderr, "Usage: hopper <command> [options]")
-	fmt.Fprintln(os.Stderr, "Commands: load, unload, config, dump, attach, detach, legacy_attach")
+	fmt.Fprintln(os.Stderr, "Commands: load, unload, config, dump, attach, detach, legacy_attach, legacy_detach")
 	fmt.Fprintln(os.Stderr, "  load")
 	fmt.Fprintln(os.Stderr, "  unload")
 	fmt.Fprintln(os.Stderr, "  attach --device <interface>")
 	fmt.Fprintln(os.Stderr, "  detach --device <interface>")
 	fmt.Fprintln(os.Stderr, "  config --device <interface> --inbound N --min N --max N [--map PATH]")
 	fmt.Fprintln(os.Stderr, "  legacy_attach --device <interface>")
+	fmt.Fprintln(os.Stderr, "  legacy_detach --device <interface> \tAttention: Not implemented by Netlink yet. For now runs 'tc filter delete ...' command")
 	fmt.Fprintln(os.Stderr, "  dump [--map PATH]")
 	os.Exit(1)
 }
@@ -352,8 +354,14 @@ func tc_attach() {
 }
 
 func tc_detach() {
-
 	iface := _device_fl()
+	cmd := exec.Command("/sbin/tc", "filter", "delete", "dev", iface.Name, "ingress")
+	must(cmd.Run())
+	cmd = exec.Command("/sbin/tc", "filter", "delete", "dev", iface.Name, "egress")
+	must(cmd.Run())
+	return
+
+	// For later fixes to use bare TC netlink
 
 	tcnl, err := tc.Open(&tc.Config{})
 	must(err)
