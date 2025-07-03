@@ -21,6 +21,7 @@ jobs:
         run: |
           CONTAINER_ID=$(docker create rocky9-build)
           docker cp $CONTAINER_ID:/build ./build
+          chmod +x ./build/hopper
           docker rm $CONTAINER_ID
 
       - name: List outputs

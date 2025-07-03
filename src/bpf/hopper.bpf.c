@@ -10,20 +10,8 @@
 #include <linux/pkt_cls.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
-#include <net/if.h>
 
 #include "common.h"
-
-#define VERBOSE
-
-#ifdef VERBOSE
-#define trace(tag, fmt, ...)                                                                       \
-    bpf_printk("%s: Index %u, Name %s, IP: src %pI4, dest %pI4, Port: src %u, dest %u\t" fmt, tag, \
-               ctx->ifindex, opt->ifname, &ip->saddr, &ip->daddr, bpf_ntohs(tcp->source),          \
-               bpf_ntohs(tcp->dest), ##__VA_ARGS__)
-#else
-#define trace(tag, fmt, ...) ;
-#endif
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -31,6 +19,29 @@ struct {
     __type(value, struct hopper_opt);
     __uint(max_entries, 100);
 } config SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 24);
+} logs SEC(".maps");
+
+const struct event* unused __attribute__((unused));
+
+static __always_inline int submit_event(struct __sk_buff* ctx, const struct iphdr* ip,
+                                        const struct tcphdr* tcp, __be16 altered_port)
+{
+    struct event* e = (bpf_ringbuf_reserve(&logs, sizeof(struct event), 0));
+    if (e) {
+        e->ifindex = ctx->ifindex;
+        e->ipv4_src = ip->saddr;
+        e->ipv4_dest = ip->daddr;
+        e->port_src = tcp->source;
+        e->port_dest = tcp->dest;
+        e->port_alter = altered_port;
+        bpf_ringbuf_submit(e, 0);
+        return 0;
+    }
+    return -1;
+}
 
 static __always_inline int verify_n_parse(struct hopper_opt* opt, void* data, void* data_end,
                                           struct ethhdr** eth, struct iphdr** ip,
@@ -65,7 +76,7 @@ int tc_port_hopper_egress(struct __sk_buff* ctx)
 
     __be16* port_ref = tcp->dest == bpf_htons(opt->in_p) ? &tcp->dest : &tcp->source;
     __be16 new_port = bpf_htons((bpf_get_prandom_u32() % (opt->max_p - opt->min_p)) + opt->min_p);
-    trace("EG", "(%u ==> %u)", bpf_ntohs(*port_ref), bpf_ntohs(new_port));
+    if (submit_event(ctx, ip, tcp, new_port)) bpf_printk("EG Failed to reserve event memory");
     *port_ref = new_port;
 
     // Attention: if egress checksum offload is not enabled, redo the checksum, just like ingress
@@ -99,7 +110,7 @@ int tc_port_hopper_ingress(struct __sk_buff* ctx)
 
     __be16* ref_port = in_range(opt, tcp->dest) ? &tcp->dest : &tcp->source;
     __be16 save = *ref_port;
-    trace("IN", "(%u ==> %u)", bpf_ntohs(*ref_port), opt->in_p);
+    if (submit_event(ctx, ip, tcp, save)) bpf_printk("IG Failed to reserve event memory");
 
     *ref_port = bpf_htons(opt->in_p);
     int off = ETH_HLEN + (ip->ihl * 4) + offsetof(struct tcphdr, check);

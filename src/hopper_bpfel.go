@@ -13,6 +13,17 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type hopperEvent struct {
+	_         structs.HostLayout
+	Ifindex   uint32
+	Ipv4Src   uint32
+	Ipv4Dest  uint32
+	PortSrc   uint16
+	PortDest  uint16
+	PortAlter uint16
+	_         [2]byte
+}
+
 type hopperHopperOpt struct {
 	_      structs.HostLayout
 	InP    uint16
@@ -72,12 +83,14 @@ type hopperProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type hopperMapSpecs struct {
 	Config *ebpf.MapSpec `ebpf:"config"`
+	Logs   *ebpf.MapSpec `ebpf:"logs"`
 }
 
 // hopperVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type hopperVariableSpecs struct {
+	Unused *ebpf.VariableSpec `ebpf:"unused"`
 }
 
 // hopperObjects contains all objects after they have been loaded into the kernel.
@@ -101,11 +114,13 @@ func (o *hopperObjects) Close() error {
 // It can be passed to loadHopperObjects or ebpf.CollectionSpec.LoadAndAssign.
 type hopperMaps struct {
 	Config *ebpf.Map `ebpf:"config"`
+	Logs   *ebpf.Map `ebpf:"logs"`
 }
 
 func (m *hopperMaps) Close() error {
 	return _HopperClose(
 		m.Config,
+		m.Logs,
 	)
 }
 
@@ -113,6 +128,7 @@ func (m *hopperMaps) Close() error {
 //
 // It can be passed to loadHopperObjects or ebpf.CollectionSpec.LoadAndAssign.
 type hopperVariables struct {
+	Unused *ebpf.Variable `ebpf:"unused"`
 }
 
 // hopperPrograms contains all programs after they have been loaded into the kernel.

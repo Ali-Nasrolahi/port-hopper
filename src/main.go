@@ -1,18 +1,24 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -verbose -target bpfel hopper bpf/hopper.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -verbose -type event -target bpfel hopper bpf/hopper.bpf.c
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	bpf "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
 	tc "github.com/florianl/go-tc"
 	"github.com/florianl/go-tc/core"
 	"golang.org/x/sys/unix"
@@ -23,6 +29,7 @@ const (
 	HOP_BPF_DIR  = "/sys/fs/bpf/hopper/"
 	MAP_DIR      = (HOP_BPF_DIR + "map/")
 	MAP_CONF     = (MAP_DIR + "config")
+	MAP_LOG      = (MAP_DIR + "logs")
 	PROG_DIR     = (HOP_BPF_DIR + "prog/")
 	LINK_DIR     = (HOP_BPF_DIR + "link/")
 	PROG_EGRESS  = (PROG_DIR + "egress")
@@ -58,6 +65,8 @@ func main() {
 		tc_attach()
 	case "legacy_detach":
 		tc_detach()
+	case "tail":
+		tail()
 	default:
 		help()
 	}
@@ -71,15 +80,25 @@ func must(e error) {
 
 func help() {
 	fmt.Fprintln(os.Stderr, "Usage: hopper <command> [options]")
-	fmt.Fprintln(os.Stderr, "Commands: load, unload, config, dump, attach, detach, legacy_attach, legacy_detach")
+	fmt.Fprintln(
+		os.Stderr,
+		"Commands: load, unload, config, dump, attach, detach, legacy_attach, legacy_detach, tail",
+	)
 	fmt.Fprintln(os.Stderr, "  load")
 	fmt.Fprintln(os.Stderr, "  unload")
 	fmt.Fprintln(os.Stderr, "  attach --device <interface>")
 	fmt.Fprintln(os.Stderr, "  detach --device <interface>")
-	fmt.Fprintln(os.Stderr, "  config --device <interface> --inbound N --min N --max N [--map PATH]")
+	fmt.Fprintln(
+		os.Stderr,
+		"  config --device <interface> --inbound N --min N --max N [--map PATH]",
+	)
 	fmt.Fprintln(os.Stderr, "  legacy_attach --device <interface>")
-	fmt.Fprintln(os.Stderr, "  legacy_detach --device <interface> \tAttention: Not implemented by Netlink yet. For now runs 'tc filter delete ...' command")
+	fmt.Fprintln(
+		os.Stderr,
+		"  legacy_detach --device <interface> \tAttention: Not implemented by Netlink yet. For now runs 'tc filter delete ...' command",
+	)
 	fmt.Fprintln(os.Stderr, "  dump [--map PATH]")
+	fmt.Fprintln(os.Stderr, "  tail [--log-map PATH]")
 	os.Exit(1)
 }
 
@@ -202,6 +221,7 @@ func load() {
 	defer objs.Close()
 
 	must(objs.hopperMaps.Config.Pin(MAP_CONF))
+	must(objs.hopperMaps.Logs.Pin(MAP_LOG))
 	must(objs.hopperPrograms.TcPortHopperEgress.Pin(PROG_EGRESS))
 	must(objs.hopperPrograms.TcPortHopperIngress.Pin(PROG_INGRESS))
 }
@@ -219,7 +239,13 @@ func unload() {
 		p.Close()
 	}
 
-	m, _ := bpf.LoadPinnedMap(MAP_CONF, nil)
+	m, _ := bpf.LoadPinnedMap(MAP_LOG, nil)
+	if m != nil {
+		m.Unpin()
+		m.Close()
+	}
+
+	m, _ = bpf.LoadPinnedMap(MAP_CONF, nil)
 	if m != nil {
 		m.Unpin()
 		m.Close()
@@ -354,41 +380,121 @@ func tc_attach() {
 }
 
 func tc_detach() {
+
 	iface := _device_fl()
+
 	cmd := exec.Command("/sbin/tc", "filter", "delete", "dev", iface.Name, "ingress")
 	must(cmd.Run())
+
 	cmd = exec.Command("/sbin/tc", "filter", "delete", "dev", iface.Name, "egress")
 	must(cmd.Run())
-	return
 
 	// For later fixes to use bare TC netlink
 
-	tcnl, err := tc.Open(&tc.Config{})
+	// tcnl, err := tc.Open(&tc.Config{})
+	// must(err)
+	// defer tcnl.Close()
+
+	// name := "tc_port_hoppedar_egress"
+	// obj := tc.Object{
+	// 	Msg: tc.Msg{
+	// 		Family:  unix.AF_UNSPEC,
+	// 		Ifindex: uint32(iface.Index),
+	// 		Handle:  0x1,
+	// 		Parent:  tc.HandleMinEgress,
+	// 		Info:    (unix.ETH_P_ALL << 16),
+	// 	},
+	// 	Attribute: tc.Attribute{
+	// 		Kind: "bpf",
+	// 		BPF: &tc.Bpf{
+	// 			Name: &name,
+	// 		},
+	// 	},
+	// }
+
+	// err = tcnl.Filter().Delete(&obj)
+	// if err != nil {
+	// 	log.Fatalf("Failed to delete filter: %v", err)
+	// }
+
+	// fmt.Println("Deleted BPF filter with handle", 0x1)
+
+}
+
+func print_event(event *hopperEvent) {
+	ifname := "NA"
+	if iface, err := net.InterfaceByIndex(int(event.Ifindex)); err == nil {
+		ifname = iface.Name
+	}
+
+	ip := func(addr uint32) string {
+		return net.IPv4(
+			byte(addr>>24), byte(addr>>16), byte(addr>>8), byte(addr),
+		).String()
+	}
+
+	convertPort := func(port uint16) uint16 {
+		var b [2]byte
+		binary.BigEndian.PutUint16(b[:], port)
+		return binary.LittleEndian.Uint16(b[:])
+	}
+
+	fmt.Printf(
+		"Interface: %s, IP src: %s, IP dest: %s, Port src %d, Port dest %d, Altered Port %d\n",
+		ifname,
+		ip(event.Ipv4Src),
+		ip(event.Ipv4Dest),
+		convertPort(event.PortSrc),
+		convertPort(event.PortDest),
+		convertPort(event.PortAlter),
+	)
+}
+
+func tail() {
+	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
+	map_file := fs.String("map", MAP_LOG, "Logs ring buffer map path")
+
+	must(fs.Parse(os.Args[2:]))
+
+	if *map_file == "" {
+		fs.Usage()
+		log.Fatal("Specify the map path!")
+	}
+
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
+
+	m, err := bpf.LoadPinnedMap(*map_file, nil)
 	must(err)
-	defer tcnl.Close()
+	defer m.Clone()
 
-	name := "tc_port_hoppedar_egress"
-	obj := tc.Object{
-		Msg: tc.Msg{
-			Family:  unix.AF_UNSPEC,
-			Ifindex: uint32(iface.Index),
-			Handle:  0x1,
-			Parent:  tc.HandleMinEgress,
-			Info:    (unix.ETH_P_ALL << 16),
-		},
-		Attribute: tc.Attribute{
-			Kind: "bpf",
-			BPF: &tc.Bpf{
-				Name: &name,
-			},
-		},
+	rd, err := ringbuf.NewReader(m)
+	must(err)
+	defer rd.Close()
+
+	go func() {
+		<-stopper
+		must(rd.Close())
+	}()
+
+	log.Println("Waiting for events..")
+
+	var event hopperEvent
+	for {
+		record, err := rd.Read()
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) {
+				return
+			}
+			continue
+		}
+
+		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
+			log.Printf("parsing ringbuf event: %s", err)
+			continue
+		}
+
+		print_event(&event)
 	}
-
-	err = tcnl.Filter().Delete(&obj)
-	if err != nil {
-		log.Fatalf("Failed to delete filter: %v", err)
-	}
-
-	fmt.Println("Deleted BPF filter with handle", 0x1)
 
 }
