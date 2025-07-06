@@ -11,7 +11,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -34,6 +33,8 @@ const (
 	LINK_DIR     = (HOP_BPF_DIR + "link/")
 	PROG_EGRESS  = (PROG_DIR + "egress")
 	PROG_INGRESS = (PROG_DIR + "ingress")
+	TC_PRIO      = (0xc000)
+	TC_HANDLE    = (0xcafe)
 )
 
 type hopper_opt struct {
@@ -93,10 +94,7 @@ func help() {
 		"  config --device <interface> --inbound N --min N --max N [--map PATH]",
 	)
 	fmt.Fprintln(os.Stderr, "  legacy_attach --device <interface>")
-	fmt.Fprintln(
-		os.Stderr,
-		"  legacy_detach --device <interface> \tAttention: Not implemented by Netlink yet. For now runs 'tc filter delete ...' command",
-	)
+	fmt.Fprintln(os.Stderr, "  legacy_detach --device <interface> ")
 	fmt.Fprintln(os.Stderr, "  dump [--map PATH]")
 	fmt.Fprintln(os.Stderr, "  tail [--log-map PATH]")
 	os.Exit(1)
@@ -284,7 +282,6 @@ func attach() {
 	must(err)
 	defer tcnl.Close()
 
-	// Ensure clsact is enabled for tcx hooks
 	tcnl.Qdisc().Add(&tc.Object{
 		Msg: tc.Msg{
 			Family:  unix.AF_UNSPEC,
@@ -357,10 +354,10 @@ func tc_attach() {
 	filter := tc.Object{
 		Msg: tc.Msg{
 			Family:  unix.AF_UNSPEC,
-			Handle:  0,
 			Ifindex: uint32(iface.Index),
+			Handle:  TC_HANDLE,
 			Parent:  core.BuildHandle(tc.HandleRoot, tc.HandleMinIngress),
-			Info:    0x300,
+			Info:    core.FilterInfo(TC_PRIO, syscall.ETH_P_ALL),
 		},
 		Attribute: tc.Attribute{
 			Kind: "bpf",
@@ -383,41 +380,26 @@ func tc_detach() {
 
 	iface := _device_fl()
 
-	cmd := exec.Command("/sbin/tc", "filter", "delete", "dev", iface.Name, "ingress")
-	must(cmd.Run())
+	tcnl, err := tc.Open(&tc.Config{})
+	must(err)
+	defer tcnl.Close()
 
-	cmd = exec.Command("/sbin/tc", "filter", "delete", "dev", iface.Name, "egress")
-	must(cmd.Run())
+	msg := tc.Msg{
+		Family:  unix.AF_UNSPEC,
+		Handle:  TC_HANDLE,
+		Ifindex: uint32(iface.Index),
+		Parent:  core.BuildHandle(tc.HandleRoot, tc.HandleMinIngress),
+		Info:    core.FilterInfo(TC_PRIO, syscall.ETH_P_ALL),
+	}
 
-	// For later fixes to use bare TC netlink
+	if err := tcnl.Filter().Delete(&tc.Object{Msg: msg, Attribute: tc.Attribute{Kind: "bpf"}}); err != nil {
+		log.Println("Failed to delete ingress filter:", err)
+	}
 
-	// tcnl, err := tc.Open(&tc.Config{})
-	// must(err)
-	// defer tcnl.Close()
-
-	// name := "tc_port_hoppedar_egress"
-	// obj := tc.Object{
-	// 	Msg: tc.Msg{
-	// 		Family:  unix.AF_UNSPEC,
-	// 		Ifindex: uint32(iface.Index),
-	// 		Handle:  0x1,
-	// 		Parent:  tc.HandleMinEgress,
-	// 		Info:    (unix.ETH_P_ALL << 16),
-	// 	},
-	// 	Attribute: tc.Attribute{
-	// 		Kind: "bpf",
-	// 		BPF: &tc.Bpf{
-	// 			Name: &name,
-	// 		},
-	// 	},
-	// }
-
-	// err = tcnl.Filter().Delete(&obj)
-	// if err != nil {
-	// 	log.Fatalf("Failed to delete filter: %v", err)
-	// }
-
-	// fmt.Println("Deleted BPF filter with handle", 0x1)
+	msg.Parent = core.BuildHandle(tc.HandleRoot, tc.HandleMinEgress)
+	if err := tcnl.Filter().Delete(&tc.Object{Msg: msg, Attribute: tc.Attribute{Kind: "bpf"}}); err != nil {
+		log.Println("Failed to delete egress filter:", err)
+	}
 
 }
 
