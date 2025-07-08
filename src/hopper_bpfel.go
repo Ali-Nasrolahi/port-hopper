@@ -25,11 +25,10 @@ type hopperEvent struct {
 }
 
 type hopperHopperOpt struct {
-	_      structs.HostLayout
-	InP    uint16
-	MinP   uint16
-	MaxP   uint16
-	Ifname [16]int8
+	_    structs.HostLayout
+	InP  uint16
+	MinP uint16
+	MaxP uint16
 }
 
 // loadHopper returns the embedded CollectionSpec for hopper.
