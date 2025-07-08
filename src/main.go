@@ -411,7 +411,10 @@ func print_event(event *hopperEvent) {
 
 	ip := func(addr uint32) string {
 		return net.IPv4(
-			byte(addr>>24), byte(addr>>16), byte(addr>>8), byte(addr),
+			byte(addr),
+			byte(addr>>8),
+			byte(addr>>16),
+			byte(addr>>24),
 		).String()
 	}
 
